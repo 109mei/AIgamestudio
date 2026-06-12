@@ -15,21 +15,23 @@ graph TD
     PM -->|仕様策定 & map.json設計| Designer["Designer"]
     Designer -->|操作性・演出設計| Programmer["Programmer"]
     Programmer -->|Pygameコード生成| QA["QA (Quality Assurance)"]
-    
-    subgraph QA_Loop ["QA 自己修復ループ (最大3回)"]
-        QA -->|テスト起動 (3秒間)| TestRun{"実行例外の検証"}
+
+    subgraph QA_Loop ["QA 自己修復ループ（最大3回）"]
+        QA -->|テスト起動（3秒間）| TestRun{"実行例外の検証"}
         TestRun -->|エラー発生| FixReq["Ollama 自動バグ修復"]
         FixReq -->|コード保存| QA
         TestRun -->|エラーなし| QA_Success["テスト合格"]
     end
-    
+
     QA_Success --> VisualCritic["VisualCritic"]
     VisualCritic -->|アセット・UI批評 & Pillow生成| Tester["Tester"]
     Tester -->|テストケース定義| End([完成 & game_manager.py 保存])
 
-    QA_Loop -->|バグ & 修正履歴の記録| RAG[(ChromaDB RAG)]
+    %% 識別子を実在するノード（QA）に修正し，文言を全角統一
+    QA -->|バグ & 修正履歴の記録| RAG[(ChromaDB RAG)]
     QA_Success -->|チェックポイント保存| TM[(TimeMachine / Git)]
 ```
+
 
 ### 2. 自己学習HUD (Study Edition) ナレッジ蓄積フロー
 自己学習HUDは、自動および手動によるインプットから情報を抽出し、Ollama を通じて構造化された技術知識としてローカルに蓄積します。
