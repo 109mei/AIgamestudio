@@ -1,37 +1,40 @@
 # GameStudio - AI自律型ゲーム開発統合シミュレータ環境 (IDERIA Engine v1.1)
 
-本プロジェクトは、最先端の自律型AIエージェント群を活用してゲーム開発を行う「**開発HUD（Studio Pro Edition）**」と、ゲーム開発技術やライセンス、通信プロトコル等の知識を自律的に学習・蓄積する「**自己学習HUD（Study Edition）**」から構成される、Pygameベース of AI自律型ゲーム開発統合シミュレータ環境（IDERIA Engine v1.1）です。
+本プロジェクトは、最先端の自律型AIエージェント群を活用してゲーム開発を行う「**開発HUD（Studio Pro Edition）**」と、ゲーム開発技術やライセンス、通信プロトコル等の知識を自律的に学習・蓄積する「**自己学習HUD（Study Edition）**」から構成される、PygameベースのAI自律型ゲーム開発統合シミュレータ環境（IDERIA Engine v1.1）です。
 
 ---
 
 ## 📐 システムアーキテクチャ (System Architecture)
 
 ### 1. 開発HUD (Studio Pro Edition) エージェント協調フロー
-開発HUDでは、6人の専門家AIエージェントがバケツリレー形式でタスクを引き継ぎ、仕様策定から実装、自己デバッグ、アートアセット生成、テストまでを完全に自動化します。
+開発HUDでは、6人の専門家AIエージェントがバケツリレー形式でタスクを引き継ぎます。以下の「ハードウェア保護」と「複数モジュール設計」を取り入れたアップデート版の自律開発フローに従ってゲームを開発します。
 
 ```mermaid
 graph TD
     User([ユーザープロンプト入力]) --> PM["PM (Project Manager)"]
-    PM -->|仕様策定 & map.json設計| Designer["Designer"]
+    PM -->|仕様策定 & モジュール設計| Designer["Designer"]
     Designer -->|操作性・演出設計| Programmer["Programmer"]
-    Programmer -->|Pygameコード生成| QA["QA (Quality Assurance)"]
+    Programmer -->|複数ファイルのコード生成| QA["QA (Quality Assurance)"]
 
-    subgraph QA_Loop ["QA 自己修復ループ（最大3回）"]
-        QA -->|テスト起動（3秒間）| TestRun{"実行例外の検証"}
-        TestRun -->|エラー発生| FixReq["Ollama 自動バグ修復"]
-        FixReq -->|コード保存| QA
-        TestRun -->|エラーなし| QA_Success["テスト合格"]
+    subgraph QA_Loop ["QA 自己修復 & ハードウェア保護ループ"]
+        QA -->|①GPU温度・VRAMチェック| Cooldown{"冷却/メモリ要件クリア?"}
+        Cooldown -->|No: 閾値超え| Sleep["指定時間 Sleep / メモリ解放"]
+        Sleep --> QA
+        Cooldown -->|Yes| TestRun["TestRun（自動プレイ&例外検証）"]
+        
+        TestRun -->|エラー発生 / 進行不能| FixReq["Ollama 自動バグ修復（要約ログ利用）"]
+        FixReq -->|コード保存 & ログ記録| RAG[(ChromaDB RAG)]
+        RAG --> QA
+        
+        TestRun -->|エラーなし & プレイ良好| QA_Success["テスト合格"]
     end
 
     QA_Success --> VisualCritic["VisualCritic"]
-    VisualCritic -->|アセット・UI批評 & Pillow生成| Tester["Tester"]
-    Tester -->|テストケース定義| End([完成 & game_manager.py 保存])
+    VisualCritic -->|アセット・UI・ゲームバランス批評| Tester["Tester"]
+    Tester -->|テストケース定義 & ビルド| End([完成 & 複数モジュール保存 / Gitコミット])
 
-    %% 識別子を実在するノード（QA）に修正し，文言を全角統一
-    QA -->|バグ & 修正履歴の記録| RAG[(ChromaDB RAG)]
     QA_Success -->|チェックポイント保存| TM[(TimeMachine / Git)]
 ```
-
 
 ### 2. 自己学習HUD (Study Edition) ナレッジ蓄積フロー
 自己学習HUDは、自動および手動によるインプットから情報を抽出し、Ollama を通じて構造化された技術知識としてローカルに蓄積します。
@@ -50,6 +53,19 @@ graph TD
     Report --> RAG[(ChromaDB 知識DB)]
     RAG -->|不要・矛盾知識の排除| Clean["矛盾クリーンアップ機能"]
 ```
+
+---
+
+## ⚠️ 設計・運用における主要課題と解決策 (Design & Operational Challenges)
+
+システムを安定稼働させ、開発クオリティを担保するために、以下の課題分析と具体的な解決策を定義し、システム設計に組み込んでいます。
+
+| 課題カテゴリー | 具体的な問題点 | 安定稼働のための解決策 |
+| :--- | :--- | :--- |
+| **1. 開発効率と精度<br>(AIの挙動制御)** | **QA修復時のハルシネーションと無限ループ**<br>ローカルLLMでバグ修復を行う際、一箇所の修正が別のバグを誘発し、ループ内で収束せずコードが破壊される。また、エラーログの累積によるコンテキスト肥大化で処理が遅延する。 | <ul><li>**ログの抽出・要約**: スタックトレースの全体ではなく、「発生したファイル名・行数・エラーの核心（末尾数行）」のみを抽出して入力。</li><li>**最小限修正（Minimal Editing）の徹底**: 「既存の正常なロジックは書き換えず、エラー発生行周辺のみをピンポイント修正する」システムプロンプトの固定。</li><li>**人間へのエスカレーション**: 3回で未解決の場合、ログを残して強制終了し、開発者に「手動修正を求める通知」を送る。</li></ul> |
+| **2. ハードウェア負荷** | **サーマルスロットリングとVRAM枯渇 (OOM)**<br>複数エージェントの駆動、ChromaDBのEmbedding、Ollama推論、Pygameテストが重なるとGPU（RTX 3070/4070等）がフル稼働し、熱ダレやOOM（メモリ不足）クラッシュを起こす。 | <ul><li>**冷却パイプラインの導入**: 処理前後に `pynvml` 等でGPU温度やVRAMを監視。閾値（例: 75°C）超過時は自動で30s〜1mの冷却ウェイトを挿入。</li><li>**メモリ強制解放の徹底**: 各タスク終了時に `gc.collect()` や `torch.cuda.empty_cache()` を明示的に呼び出し解放。</li><li>**モデルの役割分担**: エージェントの複雑さに応じてモデルサイズ（8B〜32B等）や量子化（Q4_K_M等）を最適化し、展開メモリを抑制。</li></ul> |
+| **3. ゲームデザイン<br>(品質・面白さ)** | **「動くクソゲー」の量産（論理評価の不足）**<br>従来の TestRun は「例外でクラッシュするか」のみを検証するため、「クリア不可能な難易度」「画面外へキャラが消失する」といった論理的破綻を検知できない。 | <ul><li>**「ゲーム性評価（Gameplay Evaluator）」**: 起動テスト時に「ランダム入力（Monkey Test）」や「シンプルな自律プレイBot」を数分間走行させる。</li><li>**テレメトリ（動作ログ）解析**: プレイ中の「スコア推移」「死亡頻度」「FPS」をJSON出力し、VisualCritic や Tester にゲームバランスを批評・修正させる。</li></ul> |
+| **4. データ構造と開発単位** | **単一ファイルへの依存とクラッシュ時のデータ喪失**<br>`game_manager.py` 1ファイルに集約すると、ゲーム規模拡大時にLLMの処理可能コンテキスト制限に達し精度が低下する。また、中途クラッシュで進捗が失われる。 | <ul><li>**モジュール化（複数ファイル構成）**: PM設計段階でファイルを分割（`main.py`, `player.py`, `enemy.py`, `config.py`等）し、1回あたりのLLM修正負荷を局所化する。</li><li>**トランザクション型記録**: ループの成否ごとに、スナップショットを ChromaDB RAG および Git の一時ブランチに即時コミット保存し、いつでも復元可能にする。</li></ul> |
 
 ---
 
@@ -137,7 +153,7 @@ pip install -r requirements.txt
 python ai_game_studio/studio_pro_edition.py
 ```
 - 起動するとネオン調のサイバーパンク風GUIが立ち上がります。
-- 画面中央のテキストボックスに「作成したいゲームのプロンプト」を入力し、**[DAY MODE開始]** ボタンを押下すると、AIエージェントのバケツリレーが開始されます。
+- 画面中央 of テキストボックスに「作成したいゲームのプロンプト」を入力し、**[DAY MODE開始]** ボタンを押下すると、AIエージェントのバケツリレーが開始されます。
 
 #### 📖 自己学習HUD (Study Edition) の起動
 ```bash
