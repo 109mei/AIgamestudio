@@ -1,6 +1,6 @@
 # GameStudio - AI自律型ゲーム開発統合シミュレータ環境 (IDERIA Engine v1.1)
 
-本プロジェクトは、最先端の自律型AIエージェント群を活用してゲーム開発を行う「**開発HUD（Studio Pro Edition）**」と、ゲーム開発技術やライセンス、通信プロトコル等の知識を自律的に学習・蓄積する「**自己学習HUD（Study Edition）**」から構成される、PygameベースのAI自律型ゲーム開発統合シミュレータ環境（IDERIA Engine v1.1）です。
+本プロジェクトは、最先端の自律型AIエージェント群を活用してゲーム開発を行う「**開発HUD（Studio Pro Edition）**」と、ゲーム開発技術やライセンス、通信プロトコル等の知識を自律的に学習・蓄積する「**自己学習HUD（Study Edition）**」から構成される、Pygameベース of AI自律型ゲーム開発統合シミュレータ環境（IDERIA Engine v1.1）です。
 
 ---
 
@@ -51,6 +51,35 @@ graph TD
 
 ---
 
+## 📂 プロジェクト構成 & 生成されるファイル
+
+本プロジェクトは主に以下の構造で構成されています。
+
+```text
+GameStudio/
+├── README.md (本ファイル)
+├── requirements.txt            # 依存ライブラリ一覧
+└── ai_game_studio/             # AIゲームスタジオのメインディレクトリ
+    ├── README.md               # IDERIA Engine v1.1 の詳細ドキュメント
+    ├── studio_pro_edition.py   # 開発HUD（Studio Pro Edition）ソースコード
+    ├── studio_study_edition.py # 自己学習HUD（Study Edition）ソースコード
+    ├── studio_pro_edition.spec # 開発HUDのPyInstallerビルド定義
+    ├── study_mode.spec         # 自己学習HUDのPyInstallerビルド定義
+    │
+    ├── dist/                   # ビルド済み実行ファイル (.exe) 格納フォルダ
+    │   ├── studio_pro_edition.exe
+    │   └── study_mode.exe
+    │
+    # --- 以下は実行時に自動生成される一時・管理用ファイル ---
+    ├── game_manager.py         # AIが生成・修復した最新のゲームソースコード (ホットリロード対象)
+    ├── map.json                # PMエージェントが定義したゲームオブジェクトのシリアライズデータ
+    ├── pygame_log.txt          # QA検証時のPygame実行例外ログ (自動デバッグに活用)
+    ├── ChromaDB/               # ChromaDB (RAG) のローカル永続化データベース
+    └── LearnedAssets/          # 自己学習HUDで蓄積されたレポートやPDFドキュメントの格納先
+```
+
+---
+
 ## 🛠️ 各モジュールの設計詳細
 
 ### 開発HUD: 6大エージェントの役割
@@ -96,7 +125,7 @@ graph TD
 ### 2. 依存ライブラリのインストール
 以下のコマンドを実行して、必要なパッケージをインストールしてください。
 ```bash
-pip install customtkinter pillow ollama watchdog pygame pygame-menu miniupnpc chromadb
+pip install -r requirements.txt
 ```
 
 ### 3. アプリケーションの起動
@@ -125,6 +154,23 @@ python ai_game_studio/studio_study_edition.py
     *   起動時に `127.0.0.1:11434` へ0.5秒のタイムアウトで死活確認を行います。接続できない場合は自動で「軽量モード」へとフォールバックします。
 *   **緊急停止 (ABORT STUDIO / 学習停止)**
     *   実行中にトラブルが発生した際、強制停止ボタンを押すとバックグラウンドスレッドが安全に遮断され、GPUのVRAMキャッシュがパージ・解放されます。
+
+---
+
+## ❓ トラブルシューティング & FAQ
+
+### Q. Ollama 接続エラーが表示される、または応答がない
+Ollamaがローカルマシン上で実行されていることを確認してください。タスクバーにアイコンが表示されているか、ターミナルで `ollama run llama3` が実行可能かチェックします。
+もし Ollama がインストールされていない、または起動していない場合は、シミュレータ側で自動検知され「**軽量モード**」へ自動でフォールバックします。AIによる実際のコード生成は行われませんが、疑似データを用いてシステム全体の動作確認が可能です。
+
+### Q. UPnP (ポート自動開放) が失敗する
+ご利用のルーターでUPnP（ユニバーサルプラグアンドプレイ）設定が無効になっている場合、`miniupnpc` によるポートマッピングは失敗します。この場合でもローカルネットワーク（LAN）内での通信は可能ですが、インターネット（WAN）を経由した接続を行う場合は、ルーター管理画面から手動で指定ポート（UDP）の開放設定を行ってください。
+
+### Q. crewai や chromadb のインポートエラーが発生する
+一部のライブラリ（`chromadb` や `crewai`）は、ローカル環境への導入が難しい場合に備えて、インポートできない状態でもプログラムがクラッシュしないよう、フォールバック（疑似配列処理など）が組み込まれています。ただし、RAG機能や自動デバッグ学習、高度な自律プロセスを完全な形で動作させるためには、`requirements.txt` 内のライブラリを全てインストールすることを推奨します。
+
+### Q. Pygame のプレビュー画面がメインウィンドウにドッキングせず、別ウィンドウで起動する
+OSのグラフィックス設定やSDLの相性により、`SDL_WINDOWID` によるドッキング表示が阻害される場合があります。その場合、Pygame が独立したウィンドウでポップアップ起動しますが、ゲームの動作検証や機能自体への影響はありません。
 
 ---
 
