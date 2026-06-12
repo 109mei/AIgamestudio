@@ -67,6 +67,37 @@ except ImportError:
         def schedule(self, *args, **kwargs): pass
         def start(self): pass
 
+# pynvmlのインポート（冷却用GPU温度監視）
+try:
+    import pynvml
+    HAS_PYNVML = True
+except ImportError:
+    HAS_PYNVML = False
+
+# ctypesのインポート（Windows用キーイベントMonkey Test用）
+import ctypes
+
+def summarize_error_log(log_content):
+    if not log_content:
+        return "No log content."
+    lines = log_content.strip().split("\n")
+    important_lines = []
+    for line in lines:
+        if "File " in line and "line " in line:
+            important_lines.append(line.strip())
+    if lines:
+        last_line = lines[-1].strip()
+        if last_line:
+            important_lines.append(last_line)
+    if len(lines) > 1 and not lines[-1].startswith(" "):
+        prev_line = lines[-2].strip()
+        if prev_line and prev_line not in important_lines:
+            important_lines.append(prev_line)
+    if important_lines:
+        return "\n".join(important_lines)
+    else:
+        return "\n".join(lines[-10:])
+
 def get_dummy_response(prompt, error_msg=None):
     # プロンプト内のキーワードに基づいてダミー出力を切り替えます．
     prefix = ""
@@ -252,7 +283,7 @@ def check_ollama_alive():
     except Exception:
         return False
 
-def ask_ollama(prompt):
+def ask_ollama(prompt, model="llama3"):
     # Ollamaに接続してレスポンスを取得し，失敗した場合や軽量モード時はダミー出力を返します．
     global LOW_SPEC_MODE
     if LOW_SPEC_MODE:
@@ -260,7 +291,7 @@ def ask_ollama(prompt):
         
     if HAS_OLLAMA and check_ollama_alive():
         try:
-            response = ollama.generate(model="llama3", prompt=prompt)
+            response = ollama.generate(model=model, prompt=prompt)
             return response.get("response", "")
         except Exception as e:
             return get_dummy_response(prompt, error_msg=str(e))
@@ -480,6 +511,19 @@ class ProjectUpdateHandler(FileSystemEventHandler):
 class IDERIAGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
+        
+        # エージェントごとのモデル設定（最適化・量子化対応）
+        self.agent_models = {
+            "PM": "llama3",
+            "Designer": "llama3",
+            "Programmer": "llama3",
+            "QA": "llama3",
+            "VisualCritic": "llama3",
+            "Tester": "llama3"
+        }
+        
+        # エスケープハッチ用のイベント (手動デバッグ完了シグナル)
+        self.escape_hatch_event = threading.Event()
         
         # 多言語データ定義
         self.current_lang = "JP"
@@ -1193,7 +1237,51 @@ class P2PConnection:
             for aid in self.agents:
                 self.agents[aid]["state"] = "コーヒー中" if aid == agent_id else "休憩中"
                 
-        self.log_message(f"[システム] GPU保護のため冷却待機に入ります (待機時間: {seconds}秒)．\n")
+        # GPU状態の動的チェック (pynvml)
+        gpu_temp = None
+        vram_info = ""
+        if HAS_PYNVML:
+            try:
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                gpu_temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                vram_used_mb = mem_info.used / (1024 * 1024)
+                vram_total_mb = mem_info.total / (1024 * 1024)
+                vram_info = f" | VRAM: {vram_used_mb:.1f}MB / {vram_total_mb:.1f}MB"
+            except Exception as e:
+                self.log_message(f"[警告] GPU情報の取得に失敗しました: {str(e)}\n")
+            finally:
+                try:
+                    pynvml.nvmlShutdown()
+                except Exception:
+                    pass
+
+        temp_str = f" | GPU温度: {gpu_temp}°C" if gpu_temp is not None else ""
+        self.log_message(f"[システム] GPU保護冷却チェックを実行します{temp_str}{vram_info}\n")
+        
+        # サーマルスロットリング保護: 温度が75度を超えていたら、60度を下回るまで追加で待機
+        if gpu_temp is not None and gpu_temp >= 75:
+            self.log_message(f"[システム] GPU温度が{gpu_temp}°Cに達しています（サーマルスロットリング危険値: 75°C）．冷却のため安全温度（60°C未満）に下がるまで待機します．\n")
+            while gpu_temp >= 60 and not self.abort_requested:
+                self.cool_time_text.set(f"GPU過熱待機中 ({gpu_temp}°C)")
+                time.sleep(5)
+                # 再計測
+                try:
+                    pynvml.nvmlInit()
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    gpu_temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                except Exception:
+                    break
+                finally:
+                    try:
+                        pynvml.nvmlShutdown()
+                    except Exception:
+                        pass
+            self.log_message("[システム] GPU温度が安全値まで降下しました．開発を再開します．\n")
+        
+        # 通常の固定クールダウン時間
+        self.log_message(f"[システム] 通常のGPUクールダウンに入ります（待機時間: {seconds}秒）．\n")
         for i in range(seconds):
             if self.abort_requested:
                 break
@@ -1207,8 +1295,17 @@ class P2PConnection:
 
     def run_pygame_test(self):
         self.log_message("[システム] Pygame (HUDドッキング埋め込み) の起動および実行時例外検証をトリガーします．\n")
+        # ゲーム性評価（Gameplay Evaluator）としてMonkey Testを実施
         game_script = os.path.join(self.workspace_dir, "game_manager.py")
         log_path = os.path.join(self.workspace_dir, "pygame_log.txt")
+        telemetry_path = os.path.join(self.workspace_dir, "telemetry_log.json")
+        
+        # 以前のテレメトリログを削除
+        if os.path.exists(telemetry_path):
+            try:
+                os.remove(telemetry_path)
+            except Exception:
+                pass
         
         if not os.path.exists(game_script):
             self.log_message("[システム] 検証対象の game_manager.py が見つかりません．検証をスキップします．\n")
@@ -1230,6 +1327,29 @@ class P2PConnection:
                 text=True,
                 env=env
             )
+            
+            # Monkey Test (自動キー入力) スレッドを起動 (3秒間)
+            def monkey_test():
+                if sys.platform == 'win32':
+                    keys = [0x25, 0x26, 0x27, 0x28, 0x20] # Left, Up, Right, Down, Space
+                    start = time.time()
+                    while time.time() - start < 3 and self.current_process:
+                        try:
+                            if self.current_process.poll() is not None:
+                                break
+                            key = random.choice(keys)
+                            # キーダウン
+                            ctypes.windll.user32.keybd_event(key, 0, 0, 0)
+                            time.sleep(random.uniform(0.05, 0.15))
+                            # キーアップ
+                            ctypes.windll.user32.keybd_event(key, 0, 2, 0)
+                            time.sleep(random.uniform(0.1, 0.3))
+                        except Exception:
+                            break
+            
+            monkey_thread = threading.Thread(target=monkey_test, daemon=True)
+            monkey_thread.start()
+
             try:
                 stdout, stderr = self.current_process.communicate(timeout=3)
                 if self.current_process.returncode != 0 and self.current_process.returncode is not None:
@@ -1238,10 +1358,25 @@ class P2PConnection:
                     self.log_message(f"[システム] Pygameの実行時にエラーが発生しました．ログ: {log_path}\n")
                     return False
             except subprocess.TimeoutExpired:
+                # 3秒間クラッシュせず動作した
                 self.current_process.kill()
-                self.log_message("[システム] Pygameテスト実行は正常に3秒間動作し，例外は発生しませんでした．\n")
+                self.current_process.communicate() # パイプを閉じる
+                self.log_message("[システム] Pygameテスト実行は正常に3秒間動作し，例外は発生しませんでした（Gameplay Evaluator: Monkey Test完了）．\n")
+                
+                # テレメトリチェック
+                telemetry_data = ""
+                if os.path.exists(telemetry_path):
+                    try:
+                        with open(telemetry_path, "r", encoding="utf-8") as f:
+                            telemetry_data = f.read()
+                        self.log_message("[システム] プレイ中のテレメトリデータを検出しました．ゲームプレイ評価コンテキストに登録します．\n")
+                    except Exception:
+                        pass
+                
                 with open(log_path, "w", encoding="utf-8") as f:
-                    f.write("Pygame Run Success. No errors detected during 3s run.")
+                    f.write("Pygame Run Success. No errors detected during 3s run.\n")
+                    if telemetry_data:
+                        f.write(f"Telemetry Data:\n{telemetry_data}")
                 return True
         except Exception as e:
             self.log_message(f"[システム] テストプロセス起動エラー: {str(e)}\n")
@@ -1548,6 +1683,10 @@ if __name__ == "__main__":
                 self.log_message("          \\  (•̀_•́)\n\n")
                 
                 success = False
+                
+                # トランザクション保護: デバッグ前のスナップショット
+                self.time_machine.save_checkpoint("[タイムマシン] QAデバッグ開始前のスナップショット")
+                
                 for attempt in range(1, 4):
                     self.log_message(f"[自己修復検証] 起動テストを実行中 (試行: {attempt}/3)．")
                     success = self.run_pygame_test()
@@ -1569,25 +1708,71 @@ if __name__ == "__main__":
                             with open(game_script, "r", encoding="utf-8") as f:
                                 code_content = f.read()
                                 
+                        # 解決策: エラーログの要約
+                        summarized_err = summarize_error_log(err_content)
+                        
+                        # 解決策: 最小限修正(Minimal Editing)の徹底
                         fix_prompt = (
                             f"あなたは優秀なPygameデバッガーです．以下のPygameコードを実行した際，エラーが発生しました．\n"
-                            f"発生したエラーログ:\n{err_content}\n\n"
+                            f"発生したエラーログ（要約）:\n{summarized_err}\n\n"
                             f"現在のソースコード:\n{code_content}\n\n"
-                            f"このエラーを修正した完全なソースコードを出力してください．解説は不要です．C#ではなくPythonの完全なコードを出力し，"
-                            f"コードの定義開始部分に必ず「// File: game_manager.py」を記述したコードブロックを含めてください．"
+                            f"【最小限修正（Minimal Editing）ルール】\n"
+                            f"既存の正常に動作している他のロジックやコードは絶対に書き換えたり削除したりしないでください．\n"
+                            f"エラーが発生している箇所とその周辺のみをピンポイントで修正し，修正済みの完全なPythonコードを出力してください．\n"
+                            f"解説は不要です．C#ではなくPythonの完全なコードを出力し，コードの定義開始部分に必ず「// File: game_manager.py」などのアノテーションブロックを記述してください．"
                         )
-                        fixed_code = ask_ollama(fix_prompt)
+                        fixed_code = ask_ollama(fix_prompt, model=self.agent_models["QA"])
                         self.save_code_to_project(fixed_code)
                         
                         # 改善案①: 修復成功時にバグ解決履歴をChromaDBに自己修復記憶させる
                         if attempt == 3 or self.run_pygame_test():
                             self.db_manager.add_debug_history(err_content, fixed_code)
                 
+                # 解決策: エスケープハッチ (人間へのエスカレーション) および ロールバック
                 if not success:
-                    self.log_message("[警告] 最大自己修復試行回数に達しましたが，エラーが解消されていない可能性があります．ログを確認してください．\n")
+                    self.log_message("[エスケープハッチ] 最大自己修復試行回数に達しましたが，エラーが解消されませんでした．\n")
+                    self.log_message("[ロールバック] 破壊されたコードを破棄し，デバッグ前の状態にロールバックします．\n")
+                    self.time_machine.restore_checkpoint()
+                    
+                    self.log_message("[エスカレーション] 開発者による手動修正を待機します．game_manager.py などを修正したら，通知してください．\n")
+                    
+                    # GUI上に手動修正確認用のポップアップを表示
+                    self.escape_hatch_event.clear()
+                    
+                    def show_escape_dialog():
+                        dialog = ctk.CTkToplevel(self)
+                        dialog.title("⚠️ 手動バグ修正要求 (Escaped Hatch)")
+                        dialog.geometry("420x260")
+                        dialog.transient(self)
+                        dialog.grab_set()
+                        
+                        lbl = ctk.CTkLabel(dialog, text="自己修復でエラーが解消されませんでした．\n\n安全のため，デバッグ前の状態にロールバックしました．\nソースファイルを直接手動で修正してください．\n修正完了後，以下のボタンを押して検証を再開します．", font=("Inter", 12), justify="left")
+                        lbl.pack(pady=20, padx=20)
+                        
+                        def on_retry():
+                            self.escape_hatch_event.set()
+                            dialog.destroy()
+                            
+                        btn = ctk.CTkButton(dialog, text="修正完了（テストを再実行する）", command=on_retry)
+                        btn.pack(pady=10)
+                    
+                    self.after(0, show_escape_dialog)
+                    
+                    # ボタン押下までスレッド待機
+                    while not self.escape_hatch_event.wait(timeout=1.0):
+                        if self.abort_requested:
+                            break
+                            
+                    if not self.abort_requested:
+                        self.log_message("[再検証] 手動修正コードの再テストを実行します... ")
+                        success = self.run_pygame_test()
+                        if success:
+                            self.log_message("テスト合格！手動修正が正常に適用されました．\n")
+                        else:
+                            self.log_message("不合格です．手動修正コードにもエラーが含まれていますが，進行を許可します．\n")
                 
                 self.extract_asset_list()
-                self.time_machine.save_checkpoint("[自動セーブ] QA によるコード検証および自己修復完了")
+                self.time_machine.save_checkpoint("[自動セーブ] QA によるコード検証および自己修復（または手動修正）完了")
                 if self.abort_requested:
                     break
             elif agent_id == "VisualCritic":
@@ -1599,7 +1784,7 @@ if __name__ == "__main__":
             if agent_id != "QA" and agent_id != "VisualCritic":
                 prompt = self.build_prompt_for_agent(agent_id, context)
                 self.log_message(f"[システム] {agent_id} が Ollama (llama3) で思考中です．\n")
-                response_text = ask_ollama(prompt)
+                response_text = ask_ollama(prompt, model=self.agent_models[agent_id])
                 
                 if self.abort_requested:
                     break
